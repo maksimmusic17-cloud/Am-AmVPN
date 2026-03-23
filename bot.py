@@ -70,13 +70,11 @@ def payment_kb(url):
 async def create_invoice(amount):
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
-
     data = {"asset": "USDT", "amount": amount}
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=headers) as resp:
-            res = await resp.json()
-            return res["result"]
+            return (await resp.json())["result"]
 
 async def check_invoice(invoice_id):
     url = f"https://pay.crypt.bot/api/getInvoices?invoice_ids={invoice_id}"
@@ -84,25 +82,23 @@ async def check_invoice(invoice_id):
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
-            res = await resp.json()
-            return res["result"]["items"][0]["status"]
+            return (await resp.json())["result"]["items"][0]["status"]
 
 # ---------- START ----------
 @dp.message(Command("start"))
 async def start(message: Message):
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, sub_until) VALUES (?, ?)",
-                   (message.from_user.id, None))
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (message.from_user.id, None))
     conn.commit()
 
     photo = FSInputFile("logo.jpg")
 
     await message.answer_photo(
         photo=photo,
-        caption="Главное меню",
+        caption="Добро пожаловать в VPN сервис\n\nГлавное меню:",
         reply_markup=main_menu(message.from_user.id)
     )
 
-# ---------- ПРОФИЛЬ ----------
+# ---------- PROFILE ----------
 @dp.callback_query(F.data == "profile")
 async def profile(call: CallbackQuery):
     await call.answer()
@@ -110,20 +106,23 @@ async def profile(call: CallbackQuery):
     cursor.execute("SELECT sub_until FROM users WHERE user_id=?", (call.from_user.id,))
     sub = cursor.fetchone()[0]
 
-    if sub:
-        text = f"Подписка до: {sub}"
-    else:
-        text = "У вас нет активной подписки"
+    text = f"Подписка до: {sub}" if sub else "У вас нет активной подписки"
 
-    await call.message.edit_text(text, reply_markup=main_menu(call.from_user.id))
+    await call.message.edit_caption(
+        caption=text,
+        reply_markup=main_menu(call.from_user.id)
+    )
 
-# ---------- ТАРИФЫ ----------
+# ---------- TARIFFS ----------
 @dp.callback_query(F.data == "tariffs")
 async def tariffs(call: CallbackQuery):
     await call.answer()
-    await call.message.edit_text("Выберите тариф:", reply_markup=tariffs_kb())
+    await call.message.edit_caption(
+        caption="Выберите тариф:",
+        reply_markup=tariffs_kb()
+    )
 
-# ---------- ПОКУПКА ----------
+# ---------- BUY ----------
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy(call: CallbackQuery):
     await call.answer()
@@ -135,19 +134,18 @@ async def buy(call: CallbackQuery):
     }
 
     amount, days = plans[call.data]
-
     invoice = await create_invoice(amount)
 
     cursor.execute("INSERT INTO payments VALUES (?, ?, ?)",
                    (call.from_user.id, invoice["invoice_id"], days))
     conn.commit()
 
-    await call.message.edit_text(
-        "Оплатите подписку:",
+    await call.message.edit_caption(
+        caption="Оплатите подписку:",
         reply_markup=payment_kb(invoice["pay_url"])
     )
 
-# ---------- ПРОВЕРКА ----------
+# ---------- CHECK ----------
 @dp.callback_query(F.data == "check")
 async def check(call: CallbackQuery):
     await call.answer()
@@ -161,7 +159,6 @@ async def check(call: CallbackQuery):
         return
 
     invoice_id, days = row
-
     status = await check_invoice(invoice_id)
 
     if status == "paid":
@@ -171,37 +168,43 @@ async def check(call: CallbackQuery):
                        (new_date.strftime("%Y-%m-%d"), call.from_user.id))
         conn.commit()
 
-        await call.message.edit_text(
-            f"Оплата прошла!\nПодписка до: {new_date.strftime('%Y-%m-%d')}",
+        await call.message.edit_caption(
+            caption=f"Оплата прошла!\nПодписка до: {new_date.strftime('%Y-%m-%d')}",
             reply_markup=main_menu(call.from_user.id)
         )
     else:
         await call.answer("Оплата не найдена", show_alert=True)
 
-# ---------- НАЗАД ----------
+# ---------- BACK ----------
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
     await call.answer()
-    await call.message.edit_text("Главное меню", reply_markup=main_menu(call.from_user.id))
+    await call.message.edit_caption(
+        caption="Главное меню:",
+        reply_markup=main_menu(call.from_user.id)
+    )
 
-# ---------- ПОДДЕРЖКА ----------
-support_users = {}
+# ---------- SUPPORT ----------
+support_mode = {}
 
 @dp.callback_query(F.data == "support")
 async def support(call: CallbackQuery):
     await call.answer()
-    support_users[call.from_user.id] = True
-    await call.message.edit_text("Напишите сообщение:")
+    support_mode[call.from_user.id] = True
+
+    await call.message.edit_caption(
+        caption="Напишите сообщение в поддержку:"
+    )
 
 @dp.message()
-async def messages(message: Message):
-    if message.from_user.id in support_users:
+async def support_msg(message: Message):
+    if message.from_user.id in support_mode:
         for admin in ADMINS:
             await bot.send_message(admin, f"Обращение от {message.from_user.id}:\n{message.text}")
-        await message.answer("Отправлено в поддержку")
-        support_users.pop(message.from_user.id)
+        await message.answer("Отправлено")
+        support_mode.pop(message.from_user.id)
 
-# ---------- ЗАПУСК ----------
+# ---------- RUN ----------
 async def main():
     await dp.start_polling(bot)
 
