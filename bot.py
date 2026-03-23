@@ -1,209 +1,206 @@
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta
+import random
+import string
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-from aiogram.client.default import DefaultBotProperties
 
-TOKEN = "8277007634:AAFJaW4pws234-gOuC2CsbFXJZ0DLKFTo4Q"
-
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-dp = Dispatcher()
+TOKEN = "ТВОЙ_ТОКЕН"
 
 ADMINS = [5135000311, 2032012311]
 
-# --- БАЗА ---
-conn = sqlite3.connect("vpn.db")
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+conn = sqlite3.connect("db.db")
 cursor = conn.cursor()
 
+# --- БАЗА ---
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key_value TEXT,
-    is_used INTEGER DEFAULT 0,
-    user_id INTEGER,
-    expiry_date TEXT
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY
 )
 """)
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS promocodes (
-    code TEXT UNIQUE,
-    days INTEGER,
-    uses_left INTEGER
+    code TEXT PRIMARY KEY,
+    days INTEGER
 )
 """)
 
 conn.commit()
 
-# --- FSM ---
-class AddKeys(StatesGroup):
-    waiting_for_keys = State()
+# --- КНОПКИ ---
 
-class AddPromo(StatesGroup):
-    waiting_for_promo = State()
-
-class EnterPromo(StatesGroup):
-    waiting_for_code = State()
-
-# --- МЕНЮ ---
-def get_user_menu(user_id):
-    kb = [
-        [KeyboardButton(text="🔹 Купить VPN"), KeyboardButton(text="🔑 Мои ключи")],
-        [KeyboardButton(text="🎟 Ввести промокод")]
+def main_menu(user_id):
+    buttons = [
+        [InlineKeyboardButton(text="💳 Выбрать тариф", callback_data="tariffs")],
+        [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo")]
     ]
-    if user_id in ADMINS:
-        kb.append([KeyboardButton(text="👑 Админ панель")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-admin_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Добавить ключи"), KeyboardButton(text="🎟 Добавить промокод")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🔙 Назад")]
-    ],
-    resize_keyboard=True
-)
+    if user_id in ADMINS:
+        buttons.append([InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def tariffs_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 месяц — 99₽", callback_data="t1")],
+        [InlineKeyboardButton(text="3 месяца — 299₽", callback_data="t2")],
+        [InlineKeyboardButton(text="12 месяцев — 600₽", callback_data="t3")]
+    ])
+
+
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="create_promo")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+    ])
+
+
+def stats_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="🎁 Промокоды", callback_data="promos")]
+    ])
+
 
 # --- START ---
+
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("Добро пожаловать!", reply_markup=get_user_menu(message.from_user.id))
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
+    conn.commit()
 
-# --- АДМИН ---
-@dp.message(F.text == "👑 Админ панель")
-async def admin_panel(message: Message):
-    if message.from_user.id in ADMINS:
-        await message.answer("👑 Админ панель", reply_markup=admin_menu)
+    await message.answer("👋 Добро пожаловать!", reply_markup=main_menu(message.from_user.id))
 
-@dp.message(F.text == "🔙 Назад")
-async def back(message: Message):
-    await message.answer("Главное меню", reply_markup=get_user_menu(message.from_user.id))
 
-# --- ПОКУПКА ---
-@dp.message(F.text == "🔹 Купить VPN")
-async def buy(message: Message):
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="30 дней"), KeyboardButton(text="90 дней"), KeyboardButton(text="365 дней")],
-            [KeyboardButton(text="🔙 Назад")]
-        ],
-        resize_keyboard=True
-    )
-    await message.answer("Выберите тариф:", reply_markup=kb)
+# --- ТАРИФЫ ---
 
-# --- ВЫДАЧА КЛЮЧА ---
-@dp.message(F.text.in_(["30 дней", "90 дней", "365 дней"]))
-async def give_key(message: Message):
-    days = int(message.text.split()[0])
+@dp.callback_query(F.data == "tariffs")
+async def tariffs(call: CallbackQuery):
+    await call.message.edit_text("💳 Выбери тариф:", reply_markup=tariffs_menu())
 
-    cursor.execute("SELECT * FROM keys WHERE is_used=0 LIMIT 1")
-    key = cursor.fetchone()
 
-    if key:
-        expiry = datetime.now() + timedelta(days=days)
+@dp.callback_query(F.data.in_(["t1", "t2", "t3"]))
+async def buy(call: CallbackQuery):
+    texts = {
+        "t1": "1 месяц за 99₽",
+        "t2": "3 месяца за 299₽",
+        "t3": "12 месяцев за 600₽"
+    }
+    await call.message.answer(f"Вы выбрали тариф: {texts[call.data]}\n(здесь будет оплата)")
 
-        cursor.execute(
-            "UPDATE keys SET is_used=1, user_id=?, expiry_date=? WHERE id=?",
-            (message.from_user.id, expiry.strftime("%Y-%m-%d"), key[0])
-        )
-        conn.commit()
-
-        await message.answer(
-            f"✅ Ключ:\n{key[1]}\n⏳ До: {expiry.strftime('%Y-%m-%d')}",
-            reply_markup=get_user_menu(message.from_user.id)
-        )
-    else:
-        await message.answer("❌ Нет ключей")
-
-# --- МОИ КЛЮЧИ ---
-@dp.message(F.text == "🔑 Мои ключи")
-async def my_keys(message: Message):
-    cursor.execute("SELECT key_value, expiry_date FROM keys WHERE user_id=?", (message.from_user.id,))
-    keys = cursor.fetchall()
-
-    if keys:
-        text = "\n\n".join([f"{k[0]}\n⏳ До: {k[1]}" for k in keys])
-        await message.answer(text)
-    else:
-        await message.answer("Нет ключей")
 
 # --- ПРОМОКОД ВВОД ---
-@dp.message(F.text == "🎟 Ввести промокод")
-async def promo(message: Message, state: FSMContext):
-    await state.set_state(EnterPromo.waiting_for_code)
-    await message.answer("Введите промокод:")
 
-@dp.message(EnterPromo.waiting_for_code)
-async def apply_promo(message: Message, state: FSMContext):
-    cursor.execute("SELECT days, uses_left FROM promocodes WHERE code=?", (message.text,))
-    promo = cursor.fetchone()
+user_state = {}
 
-    if promo and promo[1] > 0:
-        days = promo[0]
+@dp.callback_query(F.data == "promo")
+async def enter_promo(call: CallbackQuery):
+    user_state[call.from_user.id] = "enter_promo"
+    await call.message.answer("Введи промокод:")
 
-        cursor.execute("SELECT id, expiry_date FROM keys WHERE user_id=?", (message.from_user.id,))
-        keys = cursor.fetchall()
 
-        for k in keys:
-            expiry = datetime.strptime(k[1], "%Y-%m-%d")
-            new_expiry = expiry + timedelta(days=days)
+@dp.message()
+async def handle_text(message: Message):
+    state = user_state.get(message.from_user.id)
 
-            cursor.execute("UPDATE keys SET expiry_date=? WHERE id=?", (new_expiry.strftime("%Y-%m-%d"), k[0]))
+    # ввод промокода
+    if state == "enter_promo":
+        code = message.text.strip()
 
-        cursor.execute("UPDATE promocodes SET uses_left=uses_left-1 WHERE code=?", (message.text,))
-        conn.commit()
+        cursor.execute("SELECT days FROM promocodes WHERE code=?", (code,))
+        res = cursor.fetchone()
 
-        await message.answer(f"✅ Добавлено {days} дней!")
-    else:
-        await message.answer("❌ Неверный или использован")
-
-    await state.clear()
-
-# --- ДОБАВИТЬ КЛЮЧИ ---
-@dp.message(F.text == "➕ Добавить ключи")
-async def add_keys(message: Message, state: FSMContext):
-    if message.from_user.id in ADMINS:
-        await state.set_state(AddKeys.waiting_for_keys)
-        await message.answer("Вставь ключи:")
-
-@dp.message(AddKeys.waiting_for_keys)
-async def save_keys(message: Message, state: FSMContext):
-    for k in message.text.split("\n"):
-        cursor.execute("INSERT INTO keys (key_value) VALUES (?)", (k,))
-    conn.commit()
-    await message.answer("Готово")
-    await state.clear()
-
-# --- ПРОМОКОДЫ ---
-@dp.message(F.text == "🎟 Добавить промокод")
-async def add_promo(message: Message, state: FSMContext):
-    if message.from_user.id in ADMINS:
-        await state.set_state(AddPromo.waiting_for_promo)
-        await message.answer("Формат: CODE DAYS USES\nпример: FREE30 30 5")
-
-@dp.message(AddPromo.waiting_for_promo)
-async def save_promo(message: Message, state: FSMContext):
-    try:
-        code, days, uses = message.text.split()
-
-        cursor.execute("SELECT * FROM promocodes WHERE code=?", (code,))
-        if cursor.fetchone():
-            await message.answer("❌ Такой промокод уже есть")
+        if res:
+            await message.answer(f"✅ Промокод активирован! Дней: {res[0]}")
         else:
-            cursor.execute("INSERT INTO promocodes VALUES (?, ?, ?)", (code, int(days), int(uses)))
-            conn.commit()
-            await message.answer("✅ Добавлен")
-    except:
-        await message.answer("❌ Ошибка")
+            await message.answer("❌ Неверный промокод")
 
-    await state.clear()
+        user_state.pop(message.from_user.id, None)
+
+    # создание промокода
+    elif state == "create_promo":
+        try:
+            days = int(message.text)
+
+            # генерация уникального кода
+            while True:
+                code = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+                cursor.execute("SELECT * FROM promocodes WHERE code=?", (code,))
+                if not cursor.fetchone():
+                    break
+
+            cursor.execute("INSERT INTO promocodes VALUES (?, ?)", (code, days))
+            conn.commit()
+
+            await message.answer(f"✅ Промокод создан:\n{code}\nДней: {days}")
+            user_state.pop(message.from_user.id, None)
+
+        except:
+            await message.answer("❌ Введи число (дни)")
+
+
+# --- АДМИНКА ---
+
+@dp.callback_query(F.data == "admin")
+async def admin(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        return
+    await call.message.edit_text("⚙️ Админ панель", reply_markup=admin_menu())
+
+
+@dp.callback_query(F.data == "create_promo")
+async def create_promo(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        return
+
+    user_state[call.from_user.id] = "create_promo"
+    await call.message.answer("Введи количество дней для промокода:")
+
+
+# --- СТАТИСТИКА ---
+
+@dp.callback_query(F.data == "stats")
+async def stats(call: CallbackQuery):
+    await call.message.edit_text("📊 Статистика", reply_markup=stats_menu())
+
+
+@dp.callback_query(F.data == "users")
+async def users(call: CallbackQuery):
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+
+    await call.message.answer(f"👥 Всего пользователей: {count}")
+
+
+@dp.callback_query(F.data == "promos")
+async def promos(call: CallbackQuery):
+    cursor.execute("SELECT code, days FROM promocodes")
+    data = cursor.fetchall()
+
+    if not data:
+        await call.message.answer("Нет промокодов")
+        return
+
+    text = "🎁 Промокоды:\n\n"
+    for code, days in data:
+        text += f"{code} — {days} дней\n"
+
+    await call.message.answer(text)
+
 
 # --- ЗАПУСК ---
+
 async def main():
+    print("BOT STARTED")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
