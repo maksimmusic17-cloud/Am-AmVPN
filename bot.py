@@ -1,8 +1,10 @@
 import asyncio
 import sqlite3
 import aiohttp
+from datetime import datetime, timedelta
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import Command
 
 TOKEN = "8277007634:AAFJaW4pws234-gOuC2CsbFXJZ0DLKFTo4Q"
@@ -19,11 +21,13 @@ cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, is_used INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS invoices (user_id INTEGER, invoice_id TEXT)")
+cursor.execute("CREATE TABLE IF NOT EXISTS subs (user_id INTEGER, end_date TEXT)")
 conn.commit()
 
-# --- UI ---
+# --- МЕНЮ ---
 def menu(user_id):
     kb = [
+        [InlineKeyboardButton(text="Личный кабинет", callback_data="profile")],
         [InlineKeyboardButton(text="Выбрать тариф", callback_data="buy")],
         [InlineKeyboardButton(text="Скачать VPN", callback_data="download")],
         [InlineKeyboardButton(text="Поддержка", callback_data="support")]
@@ -41,9 +45,32 @@ async def start(message: Message):
     conn.commit()
 
     await message.answer(
-        "Добро пожаловать в VPN сервис\n\nВыберите действие:",
-        reply_markup=menu(message.from_user.id)
+        "Добро пожаловать в VPN сервис",
+        reply_markup=ReplyKeyboardRemove()
     )
+
+    await message.answer("Главное меню:", reply_markup=menu(message.from_user.id))
+
+# --- ЛИЧНЫЙ КАБИНЕТ ---
+@dp.callback_query(F.data == "profile")
+async def profile(call: CallbackQuery):
+    await call.answer()
+
+    cursor.execute("SELECT end_date FROM subs WHERE user_id=?", (call.from_user.id,))
+    sub = cursor.fetchone()
+
+    if sub:
+        end = datetime.strptime(sub[0], "%Y-%m-%d")
+        days = (end - datetime.now()).days
+        text = f"Подписка активна\nОсталось дней: {days}"
+    else:
+        text = "Подписка не активна"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb)
 
 # --- ТАРИФЫ ---
 @dp.callback_query(F.data == "buy")
@@ -51,9 +78,9 @@ async def buy(call: CallbackQuery):
     await call.answer()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц - 99₽ (1.1$)", callback_data="pay_1.1")],
-        [InlineKeyboardButton(text="3 месяца - 299₽ (3.3$)", callback_data="pay_3.3")],
-        [InlineKeyboardButton(text="1 год - 600₽ (6.6$)", callback_data="pay_6.6")],
+        [InlineKeyboardButton(text="1 месяц - 99₽ (1.1$)", callback_data="pay_1.1_30")],
+        [InlineKeyboardButton(text="3 месяца - 299₽ (3.3$)", callback_data="pay_3.3_90")],
+        [InlineKeyboardButton(text="1 год - 600₽ (6.6$)", callback_data="pay_6.6_365")],
         [InlineKeyboardButton(text="Назад", callback_data="back")]
     ])
 
@@ -79,25 +106,26 @@ async def create_invoice(amount):
 async def pay(call: CallbackQuery):
     await call.answer()
 
-    user_id = call.from_user.id
-    amount = float(call.data.split("_")[1])
+    _, amount, days = call.data.split("_")
+    amount = float(amount)
 
     invoice = await create_invoice(amount)
 
     pay_url = invoice["result"]["pay_url"]
     invoice_id = invoice["result"]["invoice_id"]
 
-    cursor.execute("INSERT INTO invoices VALUES (?, ?)", (user_id, invoice_id))
+    cursor.execute("INSERT INTO invoices VALUES (?, ?)", (call.from_user.id, invoice_id))
     conn.commit()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Оплатить", url=pay_url)],
-        [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_{invoice_id}")]
+        [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_{invoice_id}_{days}")],
+        [InlineKeyboardButton(text="Назад", callback_data="buy")]
     ])
 
-    await call.message.answer("Оплатите подписку:", reply_markup=kb)
+    await call.message.edit_text("Оплатите подписку:", reply_markup=kb)
 
-# --- ПРОВЕРКА ОПЛАТЫ ---
+# --- ПРОВЕРКА ---
 async def check_invoice(invoice_id):
     url = f"https://pay.crypt.bot/api/getInvoices?invoice_ids={invoice_id}"
     headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
@@ -111,69 +139,21 @@ async def check_invoice(invoice_id):
 async def check(call: CallbackQuery):
     await call.answer()
 
-    invoice_id = call.data.split("_")[1]
+    _, invoice_id, days = call.data.split("_")
     data = await check_invoice(invoice_id)
 
     status = data["result"]["items"][0]["status"]
 
     if status == "paid":
-        cursor.execute("SELECT user_id FROM invoices WHERE invoice_id=?", (invoice_id,))
-        user_id = cursor.fetchone()[0]
+        end_date = datetime.now() + timedelta(days=int(days))
 
-        cursor.execute("SELECT key FROM keys WHERE is_used=0 LIMIT 1")
-        key = cursor.fetchone()
+        cursor.execute("DELETE FROM subs WHERE user_id=?", (call.from_user.id,))
+        cursor.execute("INSERT INTO subs VALUES (?, ?)", (call.from_user.id, end_date.strftime("%Y-%m-%d")))
+        conn.commit()
 
-        if key:
-            cursor.execute("UPDATE keys SET is_used=1 WHERE key=?", (key[0],))
-            conn.commit()
-
-            await bot.send_message(user_id, f"Оплата прошла\n\nВаш ключ:\n{key[0]}")
-        else:
-            await bot.send_message(user_id, "Нет доступных ключей, напишите в поддержку")
-
-        await call.message.edit_text("Оплачено")
+        await call.message.edit_text("Оплата прошла. Подписка активирована")
     else:
-        await call.message.answer("Оплата не найдена")
-
-# --- АДМИНКА ---
-@dp.callback_query(F.data == "admin")
-async def admin(call: CallbackQuery):
-    await call.answer()
-
-    if call.from_user.id not in ADMINS:
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить ключ", callback_data="add_key")],
-        [InlineKeyboardButton(text="Список пользователей", callback_data="users")],
-        [InlineKeyboardButton(text="Назад", callback_data="back")]
-    ])
-
-    await call.message.edit_text("Админ панель:", reply_markup=kb)
-
-# --- ДОБАВИТЬ КЛЮЧ ---
-@dp.callback_query(F.data == "add_key")
-async def add_key(call: CallbackQuery):
-    await call.answer()
-    await call.message.answer("Отправь ключ")
-    dp.message.register(save_key)
-
-async def save_key(message: Message):
-    cursor.execute("INSERT INTO keys VALUES (?, 0)", (message.text,))
-    conn.commit()
-    await message.answer("Ключ добавлен")
-
-# --- ПОЛЬЗОВАТЕЛИ ---
-@dp.callback_query(F.data == "users")
-async def users(call: CallbackQuery):
-    await call.answer()
-
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-
-    text = "\n".join([str(u[0]) for u in users]) or "Нет пользователей"
-
-    await call.message.answer(f"Список пользователей:\n{text}")
+        await call.answer("Оплата не найдена", show_alert=True)
 
 # --- СКАЧАТЬ ---
 @dp.callback_query(F.data == "download")
@@ -187,55 +167,6 @@ async def download(call: CallbackQuery):
     ])
 
     await call.message.edit_text("Скачать VPN:", reply_markup=kb)
-
-# --- ПОДДЕРЖКА ---
-active_chats = {}
-user_state = {}
-
-@dp.callback_query(F.data == "support")
-async def support(call: CallbackQuery):
-    await call.answer()
-
-    active_chats[call.from_user.id] = True
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Закрыть чат", callback_data="close_chat")]
-    ])
-
-    await call.message.answer("Напишите сообщение:", reply_markup=kb)
-
-@dp.callback_query(F.data == "close_chat")
-async def close_chat(call: CallbackQuery):
-    await call.answer()
-    active_chats.pop(call.from_user.id, None)
-    await call.message.answer("Чат закрыт", reply_markup=menu(call.from_user.id))
-
-@dp.message()
-async def chat(message: Message):
-    user_id = message.from_user.id
-
-    if user_id in active_chats and user_id not in ADMINS:
-        for admin in ADMINS:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Ответить", callback_data=f"reply_{user_id}")]
-            ])
-            await bot.send_message(admin, f"{user_id}:\n{message.text}", reply_markup=kb)
-        return
-
-    if user_id in user_state:
-        target = user_state[user_id]
-        await bot.send_message(target, f"Поддержка:\n{message.text}")
-        await message.answer("Ответ отправлен")
-        user_state.pop(user_id)
-
-@dp.callback_query(F.data.startswith("reply_"))
-async def reply(call: CallbackQuery):
-    await call.answer()
-
-    user_id = int(call.data.split("_")[1])
-    user_state[call.from_user.id] = user_id
-
-    await call.message.answer("Введите ответ")
 
 # --- НАЗАД ---
 @dp.callback_query(F.data == "back")
