@@ -20,10 +20,11 @@ conn.commit()
 
 # --- состояния ---
 user_state = {}
-active_chats = {}  # user_id -> True
+active_chats = {}
+pending_payments = {}
 
 # --- МЕНЮ ---
-def main_menu(user_id):
+def menu(user_id):
     buttons = [
         [InlineKeyboardButton(text="Выбрать тариф", callback_data="buy")],
         [InlineKeyboardButton(text="Скачать VPN", callback_data="download")],
@@ -41,89 +42,147 @@ async def start(message: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
     conn.commit()
 
-    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
+    await message.answer("Главное меню:", reply_markup=menu(message.from_user.id))
 
-# --- ПОДДЕРЖКА СТАРТ ---
+# --- ТАРИФЫ ---
+@dp.callback_query(F.data == "buy")
+async def buy(call: CallbackQuery):
+    await call.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 месяц - 99₽", callback_data="tariff_1")],
+        [InlineKeyboardButton(text="3 месяца - 299₽", callback_data="tariff_2")],
+        [InlineKeyboardButton(text="1 год - 600₽", callback_data="tariff_3")],
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
+    ])
+
+    await call.message.edit_text("Выберите тариф:", reply_markup=kb)
+
+# --- ВЫБОР ТАРИФА ---
+@dp.callback_query(F.data.startswith("tariff_"))
+async def tariff(call: CallbackQuery):
+    await call.answer()
+
+    user_id = call.from_user.id
+    pending_payments[user_id] = call.data
+
+    await call.message.answer("Отправьте скриншот оплаты")
+
+# --- ПРИЁМ СКРИНА ---
+@dp.message(F.photo)
+async def payment(message: Message):
+    user_id = message.from_user.id
+
+    if user_id not in pending_payments:
+        return
+
+    for admin in ADMINS:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Подтвердить", callback_data=f"ok_{user_id}")]
+        ])
+
+        await bot.send_photo(
+            admin,
+            message.photo[-1].file_id,
+            caption=f"Оплата от {user_id}",
+            reply_markup=kb
+        )
+
+    await message.answer("Ожидайте подтверждения")
+
+# --- ПОДТВЕРЖДЕНИЕ ---
+@dp.callback_query(F.data.startswith("ok_"))
+async def ok(call: CallbackQuery):
+    await call.answer()
+
+    if call.from_user.id not in ADMINS:
+        return
+
+    user_id = int(call.data.split("_")[1])
+
+    cursor.execute("SELECT key FROM keys WHERE is_used=0 LIMIT 1")
+    key = cursor.fetchone()
+
+    if key:
+        cursor.execute("UPDATE keys SET is_used=1 WHERE key=?", (key[0],))
+        conn.commit()
+        await bot.send_message(user_id, f"Ваш ключ:\n{key[0]}")
+    else:
+        await bot.send_message(user_id, "Нет доступных ключей")
+
+    await call.message.edit_caption("Подтверждено")
+
+# --- ПОДДЕРЖКА ---
 @dp.callback_query(F.data == "support")
 async def support(call: CallbackQuery):
+    await call.answer()
+
     user_id = call.from_user.id
     active_chats[user_id] = True
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Закрыть чат", callback_data="close_chat")]
+        [InlineKeyboardButton(text="Закрыть чат", callback_data="close")]
     ])
 
-    await call.message.answer(
-        "Чат с поддержкой открыт. Напишите сообщение.",
-        reply_markup=kb
-    )
+    await call.message.answer("Напишите сообщение:", reply_markup=kb)
 
 # --- ЗАКРЫТЬ ЧАТ ---
-@dp.callback_query(F.data == "close_chat")
-async def close_chat(call: CallbackQuery):
-    user_id = call.from_user.id
+@dp.callback_query(F.data == "close")
+async def close(call: CallbackQuery):
+    await call.answer()
 
-    if user_id in active_chats:
-        active_chats.pop(user_id)
+    active_chats.pop(call.from_user.id, None)
+    await call.message.answer("Чат закрыт", reply_markup=menu(call.from_user.id))
 
-    await call.message.answer("Чат закрыт", reply_markup=main_menu(user_id))
-
-# --- ПЕРЕСЫЛКА СООБЩЕНИЙ ---
+# --- ЧАТ ---
 @dp.message()
-async def chat_handler(message: Message):
+async def chat(message: Message):
     user_id = message.from_user.id
 
-    # пользователь пишет в поддержку
+    # пользователь пишет
     if user_id in active_chats and user_id not in ADMINS:
         for admin in ADMINS:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Ответить", callback_data=f"reply_{user_id}")]
             ])
-
-            await bot.send_message(
-                admin,
-                f"Сообщение от {user_id}:\n{message.text}",
-                reply_markup=kb
-            )
-
+            await bot.send_message(admin, f"{user_id}:\n{message.text}", reply_markup=kb)
         return
 
     # админ отвечает
-    state = user_state.get(user_id)
-
-    if isinstance(state, tuple) and state[0] == "reply":
-        target_user = state[1]
-
-        await bot.send_message(target_user, f"Поддержка:\n{message.text}")
-        await message.answer("Ответ отправлен")
-
+    if user_id in user_state:
+        target = user_state[user_id]
+        await bot.send_message(target, f"Поддержка:\n{message.text}")
+        await message.answer("Отправлено")
         user_state.pop(user_id)
 
-# --- КНОПКА ОТВЕТИТЬ ---
+# --- ОТВЕТ ---
 @dp.callback_query(F.data.startswith("reply_"))
 async def reply(call: CallbackQuery):
-    if call.from_user.id not in ADMINS:
-        return
+    await call.answer()
 
     user_id = int(call.data.split("_")[1])
-    user_state[call.from_user.id] = ("reply", user_id)
+    user_state[call.from_user.id] = user_id
 
-    await call.message.answer(f"Введите ответ для {user_id}:")
+    await call.message.answer("Введите ответ")
 
-# --- СКАЧАТЬ VPN ---
+# --- СКАЧАТЬ ---
 @dp.callback_query(F.data == "download")
 async def download(call: CallbackQuery):
+    await call.answer()
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Для ПК", url="https://example.com")],
-        [InlineKeyboardButton(text="Для Android", url="https://example.com")],
+        [InlineKeyboardButton(text="ПК", url="https://example.com")],
+        [InlineKeyboardButton(text="Android", url="https://example.com")],
         [InlineKeyboardButton(text="Назад", callback_data="back")]
     ])
+
     await call.message.edit_text("Скачать VPN:", reply_markup=kb)
 
 # --- НАЗАД ---
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
-    await call.message.edit_text("Главное меню:", reply_markup=main_menu(call.from_user.id))
+    await call.answer()
+    await call.message.edit_text("Главное меню:", reply_markup=menu(call.from_user.id))
 
 # --- ЗАПУСК ---
 async def main():
