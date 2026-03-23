@@ -1,35 +1,33 @@
 import asyncio
 import sqlite3
-import random
-import string
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import Command
 
-TOKEN = "8277007634:AAFJaW4pws234-gOuC2CsbFXJZ0DLKFTo4Q"
+TOKEN = "ТВОЙ_ТОКЕН_СЮДА"
 ADMINS = [5135000311, 2032012311]
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- БАЗА ---
-conn = sqlite3.connect("db.db")
+conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
+# --- БД ---
 cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
-cursor.execute("CREATE TABLE IF NOT EXISTS promocodes (code TEXT PRIMARY KEY, days INTEGER)")
+cursor.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, is_used INTEGER DEFAULT 0)")
 conn.commit()
 
+# --- состояния ---
 user_state = {}
+active_chats = {}  # user_id -> True
 
-# --- КНОПКИ ---
-
+# --- МЕНЮ ---
 def main_menu(user_id):
     buttons = [
-        [InlineKeyboardButton(text="Выбрать тариф", callback_data="tariffs")],
-        [InlineKeyboardButton(text="Ввести промокод", callback_data="enter_promo")],
-        [InlineKeyboardButton(text="Скачать VPN", callback_data="download")]
+        [InlineKeyboardButton(text="Выбрать тариф", callback_data="buy")],
+        [InlineKeyboardButton(text="Скачать VPN", callback_data="download")],
+        [InlineKeyboardButton(text="Поддержка", callback_data="support")]
     ]
 
     if user_id in ADMINS:
@@ -37,200 +35,99 @@ def main_menu(user_id):
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-def tariffs_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц - 99₽", callback_data="t1")],
-        [InlineKeyboardButton(text="3 месяца - 299₽", callback_data="t2")],
-        [InlineKeyboardButton(text="12 месяцев - 600₽", callback_data="t3")],
-        [InlineKeyboardButton(text="Назад", callback_data="back")]
-    ])
-
-
-def download_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ПК", callback_data="pc")],
-        [InlineKeyboardButton(text="Android", callback_data="android")],
-        [InlineKeyboardButton(text="Назад", callback_data="back")]
-    ])
-
-
-def admin_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Создать промокод", callback_data="create_promo")],
-        [InlineKeyboardButton(text="Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="Назад", callback_data="back")]
-    ])
-
-
-def stats_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пользователи", callback_data="users")],
-        [InlineKeyboardButton(text="Промокоды", callback_data="promos")],
-        [InlineKeyboardButton(text="Назад", callback_data="admin")]
-    ])
-
-# --- START ---
-
-@dp.message(CommandStart())
+# --- СТАРТ ---
+@dp.message(Command("start"))
 async def start(message: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
     conn.commit()
 
     await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
+# --- ПОДДЕРЖКА СТАРТ ---
+@dp.callback_query(F.data == "support")
+async def support(call: CallbackQuery):
+    user_id = call.from_user.id
+    active_chats[user_id] = True
 
-# --- НАВИГАЦИЯ ---
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Закрыть чат", callback_data="close_chat")]
+    ])
 
+    await call.message.answer(
+        "Чат с поддержкой открыт. Напишите сообщение.",
+        reply_markup=kb
+    )
+
+# --- ЗАКРЫТЬ ЧАТ ---
+@dp.callback_query(F.data == "close_chat")
+async def close_chat(call: CallbackQuery):
+    user_id = call.from_user.id
+
+    if user_id in active_chats:
+        active_chats.pop(user_id)
+
+    await call.message.answer("Чат закрыт", reply_markup=main_menu(user_id))
+
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ ---
+@dp.message()
+async def chat_handler(message: Message):
+    user_id = message.from_user.id
+
+    # пользователь пишет в поддержку
+    if user_id in active_chats and user_id not in ADMINS:
+        for admin in ADMINS:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Ответить", callback_data=f"reply_{user_id}")]
+            ])
+
+            await bot.send_message(
+                admin,
+                f"Сообщение от {user_id}:\n{message.text}",
+                reply_markup=kb
+            )
+
+        return
+
+    # админ отвечает
+    state = user_state.get(user_id)
+
+    if isinstance(state, tuple) and state[0] == "reply":
+        target_user = state[1]
+
+        await bot.send_message(target_user, f"Поддержка:\n{message.text}")
+        await message.answer("Ответ отправлен")
+
+        user_state.pop(user_id)
+
+# --- КНОПКА ОТВЕТИТЬ ---
+@dp.callback_query(F.data.startswith("reply_"))
+async def reply(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        return
+
+    user_id = int(call.data.split("_")[1])
+    user_state[call.from_user.id] = ("reply", user_id)
+
+    await call.message.answer(f"Введите ответ для {user_id}:")
+
+# --- СКАЧАТЬ VPN ---
+@dp.callback_query(F.data == "download")
+async def download(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Для ПК", url="https://example.com")],
+        [InlineKeyboardButton(text="Для Android", url="https://example.com")],
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
+    ])
+    await call.message.edit_text("Скачать VPN:", reply_markup=kb)
+
+# --- НАЗАД ---
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
     await call.message.edit_text("Главное меню:", reply_markup=main_menu(call.from_user.id))
 
-
-# --- ТАРИФЫ ---
-
-@dp.callback_query(F.data == "tariffs")
-async def tariffs(call: CallbackQuery):
-    await call.message.edit_text("Выбери тариф:", reply_markup=tariffs_menu())
-
-
-@dp.callback_query(F.data.in_(["t1", "t2", "t3"]))
-async def buy(call: CallbackQuery):
-    texts = {
-        "t1": "1 месяц - 99₽",
-        "t2": "3 месяца - 299₽",
-        "t3": "12 месяцев - 600₽"
-    }
-    await call.message.answer(f"Вы выбрали: {texts[call.data]}")
-
-
-# --- СКАЧАТЬ VPN ---
-
-@dp.callback_query(F.data == "download")
-async def download(call: CallbackQuery):
-    await call.message.edit_text("Выбери устройство:", reply_markup=download_menu())
-
-
-@dp.callback_query(F.data == "pc")
-async def pc(call: CallbackQuery):
-    await call.message.answer("Скачать VPN для ПК: (сюда вставишь ссылку)")
-
-
-@dp.callback_query(F.data == "android")
-async def android(call: CallbackQuery):
-    await call.message.answer("Скачать VPN для Android: (сюда вставишь ссылку)")
-
-
-# --- ПРОМОКОД ---
-
-@dp.callback_query(F.data == "enter_promo")
-async def promo(call: CallbackQuery):
-    user_state[call.from_user.id] = "enter_promo"
-    await call.message.answer("Введи промокод:")
-
-
-# --- АДМИН ---
-
-@dp.callback_query(F.data == "admin")
-async def admin(call: CallbackQuery):
-    if call.from_user.id not in ADMINS:
-        return
-    await call.message.edit_text("Админ панель:", reply_markup=admin_menu())
-
-
-@dp.callback_query(F.data == "create_promo")
-async def create_promo(call: CallbackQuery):
-    if call.from_user.id not in ADMINS:
-        return
-
-    user_state[call.from_user.id] = "create_promo"
-    await call.message.answer("Введи количество дней:")
-
-
-# --- СТАТИСТИКА ---
-
-@dp.callback_query(F.data == "stats")
-async def stats(call: CallbackQuery):
-    await call.message.edit_text("Статистика:", reply_markup=stats_menu())
-
-
-@dp.callback_query(F.data == "users")
-async def users(call: CallbackQuery):
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-
-    if not users:
-        await call.message.answer("Нет пользователей")
-        return
-
-    text = "Список пользователей:\n\n"
-    for u in users:
-        text += f"{u[0]}\n"
-
-    await call.message.answer(text)
-
-
-@dp.callback_query(F.data == "promos")
-async def promos(call: CallbackQuery):
-    cursor.execute("SELECT code, days FROM promocodes")
-    data = cursor.fetchall()
-
-    if not data:
-        await call.message.answer("Нет промокодов")
-        return
-
-    text = "Промокоды:\n\n"
-    for code, days in data:
-        text += f"{code} - {days} дней\n"
-
-    await call.message.answer(text)
-
-
-# --- ТЕКСТ ---
-
-@dp.message()
-async def handle_text(message: Message):
-    state = user_state.get(message.from_user.id)
-
-    if state == "enter_promo":
-        code = message.text.strip()
-
-        cursor.execute("SELECT days FROM promocodes WHERE code=?", (code,))
-        res = cursor.fetchone()
-
-        if res:
-            await message.answer(f"Активировано: {res[0]} дней")
-        else:
-            await message.answer("Неверный промокод")
-
-        user_state.pop(message.from_user.id, None)
-
-    elif state == "create_promo":
-        try:
-            days = int(message.text)
-
-            while True:
-                code = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-                cursor.execute("SELECT * FROM promocodes WHERE code=?", (code,))
-                if not cursor.fetchone():
-                    break
-
-            cursor.execute("INSERT INTO promocodes VALUES (?, ?)", (code, days))
-            conn.commit()
-
-            await message.answer(f"Промокод: {code}\nДней: {days}")
-            user_state.pop(message.from_user.id, None)
-
-        except:
-            await message.answer("Введи число!")
-
-
 # --- ЗАПУСК ---
-
 async def main():
-    print("BOT STARTED")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
