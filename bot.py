@@ -22,12 +22,13 @@ cursor.execute("CREATE TABLE IF NOT EXISTS invoices (user_id INTEGER, invoice_id
 conn.commit()
 
 # --- UI ---
-def main_menu(user_id):
+def menu(user_id):
     kb = [
         [InlineKeyboardButton(text="Выбрать тариф", callback_data="buy")],
         [InlineKeyboardButton(text="Скачать VPN", callback_data="download")],
         [InlineKeyboardButton(text="Поддержка", callback_data="support")]
     ]
+
     if user_id in ADMINS:
         kb.append([InlineKeyboardButton(text="Админ панель", callback_data="admin")])
 
@@ -41,7 +42,7 @@ async def start(message: Message):
 
     await message.answer(
         "Добро пожаловать в VPN сервис\n\nВыберите действие:",
-        reply_markup=main_menu(message.from_user.id)
+        reply_markup=menu(message.from_user.id)
     )
 
 # --- ТАРИФЫ ---
@@ -50,9 +51,9 @@ async def buy(call: CallbackQuery):
     await call.answer()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц - 99₽", callback_data="pay_99")],
-        [InlineKeyboardButton(text="3 месяца - 299₽", callback_data="pay_299")],
-        [InlineKeyboardButton(text="1 год - 600₽", callback_data="pay_600")],
+        [InlineKeyboardButton(text="1 месяц - 99₽ (1.1$)", callback_data="pay_1.1")],
+        [InlineKeyboardButton(text="3 месяца - 299₽ (3.3$)", callback_data="pay_3.3")],
+        [InlineKeyboardButton(text="1 год - 600₽ (6.6$)", callback_data="pay_6.6")],
         [InlineKeyboardButton(text="Назад", callback_data="back")]
     ])
 
@@ -79,9 +80,9 @@ async def pay(call: CallbackQuery):
     await call.answer()
 
     user_id = call.from_user.id
-    price = call.data.split("_")[1]
+    amount = float(call.data.split("_")[1])
 
-    invoice = await create_invoice(price)
+    invoice = await create_invoice(amount)
 
     pay_url = invoice["result"]["pay_url"]
     invoice_id = invoice["result"]["invoice_id"]
@@ -105,7 +106,7 @@ async def check_invoice(invoice_id):
         async with session.get(url, headers=headers) as resp:
             return await resp.json()
 
-# --- КНОПКА ПРОВЕРИТЬ ---
+# --- ПРОВЕРИТЬ ---
 @dp.callback_query(F.data.startswith("check_"))
 async def check(call: CallbackQuery):
     await call.answer()
@@ -128,7 +129,7 @@ async def check(call: CallbackQuery):
 
             await bot.send_message(user_id, f"Оплата прошла\n\nВаш ключ:\n{key[0]}")
         else:
-            await bot.send_message(user_id, "Нет ключей, напишите в поддержку")
+            await bot.send_message(user_id, "Нет доступных ключей, напишите в поддержку")
 
         await call.message.edit_text("Оплачено")
     else:
@@ -162,7 +163,7 @@ async def save_key(message: Message):
     conn.commit()
     await message.answer("Ключ добавлен")
 
-# --- СПИСОК ПОЛЬЗОВАТЕЛЕЙ ---
+# --- ПОЛЬЗОВАТЕЛИ ---
 @dp.callback_query(F.data == "users")
 async def users(call: CallbackQuery):
     await call.answer()
@@ -170,9 +171,9 @@ async def users(call: CallbackQuery):
     cursor.execute("SELECT user_id FROM users")
     users = cursor.fetchall()
 
-    text = "\n".join([str(u[0]) for u in users])
+    text = "\n".join([str(u[0]) for u in users]) or "Нет пользователей"
 
-    await call.message.answer(f"Пользователи:\n{text}")
+    await call.message.answer(f"Список пользователей:\n{text}")
 
 # --- СКАЧАТЬ ---
 @dp.callback_query(F.data == "download")
@@ -187,11 +188,60 @@ async def download(call: CallbackQuery):
 
     await call.message.edit_text("Скачать VPN:", reply_markup=kb)
 
+# --- ПОДДЕРЖКА ---
+active_chats = {}
+user_state = {}
+
+@dp.callback_query(F.data == "support")
+async def support(call: CallbackQuery):
+    await call.answer()
+
+    active_chats[call.from_user.id] = True
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Закрыть чат", callback_data="close_chat")]
+    ])
+
+    await call.message.answer("Напишите сообщение:", reply_markup=kb)
+
+@dp.callback_query(F.data == "close_chat")
+async def close_chat(call: CallbackQuery):
+    await call.answer()
+    active_chats.pop(call.from_user.id, None)
+    await call.message.answer("Чат закрыт", reply_markup=menu(call.from_user.id))
+
+@dp.message()
+async def chat(message: Message):
+    user_id = message.from_user.id
+
+    if user_id in active_chats and user_id not in ADMINS:
+        for admin in ADMINS:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Ответить", callback_data=f"reply_{user_id}")]
+            ])
+            await bot.send_message(admin, f"{user_id}:\n{message.text}", reply_markup=kb)
+        return
+
+    if user_id in user_state:
+        target = user_state[user_id]
+        await bot.send_message(target, f"Поддержка:\n{message.text}")
+        await message.answer("Ответ отправлен")
+        user_state.pop(user_id)
+
+@dp.callback_query(F.data.startswith("reply_"))
+async def reply(call: CallbackQuery):
+    await call.answer()
+
+    user_id = int(call.data.split("_")[1])
+    user_state[call.from_user.id] = user_id
+
+    await call.message.answer("Введите ответ")
+
 # --- НАЗАД ---
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
     await call.answer()
-    await call.message.edit_text("Главное меню:", reply_markup=main_menu(call.from_user.id))
+    await call.message.edit_text("Главное меню:", reply_markup=menu(call.from_user.id))
 
 # --- ЗАПУСК ---
 async def main():
