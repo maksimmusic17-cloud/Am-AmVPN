@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import aiohttp
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, FSInputFile
@@ -14,19 +15,33 @@ ADMINS = [5135000311, 2032012311]
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
 logging.basicConfig(level=logging.INFO)
 
+# ---------- БД ----------
 conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
-cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER)")
-cursor.execute("CREATE TABLE IF NOT EXISTS payments (user_id INTEGER, invoice_id INTEGER)")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    sub_until TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS payments (
+    user_id INTEGER,
+    invoice_id INTEGER,
+    days INTEGER
+)
+""")
+
 conn.commit()
 
 # ---------- UI ----------
 def main_menu(user_id):
     kb = InlineKeyboardBuilder()
+    kb.button(text="Личный кабинет", callback_data="profile")
     kb.button(text="Выбрать тариф", callback_data="tariffs")
     kb.button(text="Поддержка", callback_data="support")
     if user_id in ADMINS:
@@ -36,9 +51,9 @@ def main_menu(user_id):
 
 def tariffs_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="1 месяц - 99₽ (1.1$)", callback_data="buy_1")
-    kb.button(text="3 месяца - 299₽ (3.3$)", callback_data="buy_3")
-    kb.button(text="1 год - 600₽ (6.6$)", callback_data="buy_12")
+    kb.button(text="1 месяц - 99₽ (1.1$)", callback_data="buy_30")
+    kb.button(text="3 месяца - 299₽ (3.3$)", callback_data="buy_90")
+    kb.button(text="1 год - 600₽ (6.6$)", callback_data="buy_365")
     kb.button(text="Назад", callback_data="back")
     kb.adjust(1)
     return kb.as_markup()
@@ -51,15 +66,12 @@ def payment_kb(url):
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- CryptoBot ----------
+# ---------- Crypto ----------
 async def create_invoice(amount):
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
 
-    data = {
-        "asset": "USDT",
-        "amount": amount
-    }
+    data = {"asset": "USDT", "amount": amount}
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=headers) as resp:
@@ -78,7 +90,8 @@ async def check_invoice(invoice_id):
 # ---------- START ----------
 @dp.message(Command("start"))
 async def start(message: Message):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, sub_until) VALUES (?, ?)",
+                   (message.from_user.id, None))
     conn.commit()
 
     photo = FSInputFile("logo.jpg")
@@ -89,50 +102,104 @@ async def start(message: Message):
         reply_markup=main_menu(message.from_user.id)
     )
 
+# ---------- ПРОФИЛЬ ----------
+@dp.callback_query(F.data == "profile")
+async def profile(call: CallbackQuery):
+    await call.answer()
+
+    cursor.execute("SELECT sub_until FROM users WHERE user_id=?", (call.from_user.id,))
+    sub = cursor.fetchone()[0]
+
+    if sub:
+        text = f"Подписка до: {sub}"
+    else:
+        text = "У вас нет активной подписки"
+
+    await call.message.edit_text(text, reply_markup=main_menu(call.from_user.id))
+
 # ---------- ТАРИФЫ ----------
 @dp.callback_query(F.data == "tariffs")
 async def tariffs(call: CallbackQuery):
+    await call.answer()
     await call.message.edit_text("Выберите тариф:", reply_markup=tariffs_kb())
 
+# ---------- ПОКУПКА ----------
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy(call: CallbackQuery):
+    await call.answer()
+
     plans = {
-        "buy_1": 1.1,
-        "buy_3": 3.3,
-        "buy_12": 6.6
+        "buy_30": (1.1, 30),
+        "buy_90": (3.3, 90),
+        "buy_365": (6.6, 365)
     }
 
-    amount = plans[call.data]
+    amount, days = plans[call.data]
 
     invoice = await create_invoice(amount)
 
-    invoice_id = invoice["invoice_id"]
-    pay_url = invoice["pay_url"]
-
-    cursor.execute("INSERT INTO payments VALUES (?, ?)", (call.from_user.id, invoice_id))
+    cursor.execute("INSERT INTO payments VALUES (?, ?, ?)",
+                   (call.from_user.id, invoice["invoice_id"], days))
     conn.commit()
 
     await call.message.edit_text(
         "Оплатите подписку:",
-        reply_markup=payment_kb(pay_url)
+        reply_markup=payment_kb(invoice["pay_url"])
     )
 
 # ---------- ПРОВЕРКА ----------
 @dp.callback_query(F.data == "check")
 async def check(call: CallbackQuery):
-    cursor.execute("SELECT invoice_id FROM payments WHERE user_id=?", (call.from_user.id,))
+    await call.answer()
+
+    cursor.execute("SELECT invoice_id, days FROM payments WHERE user_id=? ORDER BY rowid DESC",
+                   (call.from_user.id,))
     row = cursor.fetchone()
 
     if not row:
         await call.answer("Нет оплаты", show_alert=True)
         return
 
-    status = await check_invoice(row[0])
+    invoice_id, days = row
+
+    status = await check_invoice(invoice_id)
 
     if status == "paid":
-        await call.message.edit_text("Оплата прошла! Ваш VPN ключ:\nABC-123-XYZ")
+        new_date = datetime.now() + timedelta(days=days)
+
+        cursor.execute("UPDATE users SET sub_until=? WHERE user_id=?",
+                       (new_date.strftime("%Y-%m-%d"), call.from_user.id))
+        conn.commit()
+
+        await call.message.edit_text(
+            f"Оплата прошла!\nПодписка до: {new_date.strftime('%Y-%m-%d')}",
+            reply_markup=main_menu(call.from_user.id)
+        )
     else:
         await call.answer("Оплата не найдена", show_alert=True)
+
+# ---------- НАЗАД ----------
+@dp.callback_query(F.data == "back")
+async def back(call: CallbackQuery):
+    await call.answer()
+    await call.message.edit_text("Главное меню", reply_markup=main_menu(call.from_user.id))
+
+# ---------- ПОДДЕРЖКА ----------
+support_users = {}
+
+@dp.callback_query(F.data == "support")
+async def support(call: CallbackQuery):
+    await call.answer()
+    support_users[call.from_user.id] = True
+    await call.message.edit_text("Напишите сообщение:")
+
+@dp.message()
+async def messages(message: Message):
+    if message.from_user.id in support_users:
+        for admin in ADMINS:
+            await bot.send_message(admin, f"Обращение от {message.from_user.id}:\n{message.text}")
+        await message.answer("Отправлено в поддержку")
+        support_users.pop(message.from_user.id)
 
 # ---------- ЗАПУСК ----------
 async def main():
