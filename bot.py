@@ -21,45 +21,53 @@ cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS promocodes (code TEXT PRIMARY KEY, days INTEGER)")
 conn.commit()
 
-# --- СОСТОЯНИЯ ---
 user_state = {}
 
 # --- КНОПКИ ---
 
 def main_menu(user_id):
     buttons = [
-        [InlineKeyboardButton(text="💳 Выбрать тариф", callback_data="tariffs")],
-        [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="enter_promo")]
+        [InlineKeyboardButton(text="Выбрать тариф", callback_data="tariffs")],
+        [InlineKeyboardButton(text="Ввести промокод", callback_data="enter_promo")],
+        [InlineKeyboardButton(text="Скачать VPN", callback_data="download")]
     ]
 
     if user_id in ADMINS:
-        buttons.append([InlineKeyboardButton(text="⚙️ Админ панель", callback_data="admin")])
+        buttons.append([InlineKeyboardButton(text="Админ панель", callback_data="admin")])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def tariffs_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц — 99₽", callback_data="t1")],
-        [InlineKeyboardButton(text="3 месяца — 299₽", callback_data="t2")],
-        [InlineKeyboardButton(text="12 месяцев — 600₽", callback_data="t3")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+        [InlineKeyboardButton(text="1 месяц - 99₽", callback_data="t1")],
+        [InlineKeyboardButton(text="3 месяца - 299₽", callback_data="t2")],
+        [InlineKeyboardButton(text="12 месяцев - 600₽", callback_data="t3")],
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
+    ])
+
+
+def download_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ПК", callback_data="pc")],
+        [InlineKeyboardButton(text="Android", callback_data="android")],
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
     ])
 
 
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="create_promo")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+        [InlineKeyboardButton(text="Создать промокод", callback_data="create_promo")],
+        [InlineKeyboardButton(text="Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="Назад", callback_data="back")]
     ])
 
 
 def stats_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
-        [InlineKeyboardButton(text="🎁 Промокоды", callback_data="promos")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")]
+        [InlineKeyboardButton(text="Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="Промокоды", callback_data="promos")],
+        [InlineKeyboardButton(text="Назад", callback_data="admin")]
     ])
 
 # --- START ---
@@ -69,34 +77,51 @@ async def start(message: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
     conn.commit()
 
-    await message.answer("👋 Главное меню:", reply_markup=main_menu(message.from_user.id))
+    await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
 
 
 # --- НАВИГАЦИЯ ---
 
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
-    await call.message.edit_text("👋 Главное меню:", reply_markup=main_menu(call.from_user.id))
+    await call.message.edit_text("Главное меню:", reply_markup=main_menu(call.from_user.id))
 
 
 # --- ТАРИФЫ ---
 
 @dp.callback_query(F.data == "tariffs")
 async def tariffs(call: CallbackQuery):
-    await call.message.edit_text("💳 Выбери тариф:", reply_markup=tariffs_menu())
+    await call.message.edit_text("Выбери тариф:", reply_markup=tariffs_menu())
 
 
 @dp.callback_query(F.data.in_(["t1", "t2", "t3"]))
 async def buy(call: CallbackQuery):
     texts = {
-        "t1": "1 месяц — 99₽",
-        "t2": "3 месяца — 299₽",
-        "t3": "12 месяцев — 600₽"
+        "t1": "1 месяц - 99₽",
+        "t2": "3 месяца - 299₽",
+        "t3": "12 месяцев - 600₽"
     }
-    await call.message.answer(f"✅ Вы выбрали: {texts[call.data]}\n(здесь будет оплата)")
+    await call.message.answer(f"Вы выбрали: {texts[call.data]}")
 
 
-# --- ПРОМОКОД ВВОД ---
+# --- СКАЧАТЬ VPN ---
+
+@dp.callback_query(F.data == "download")
+async def download(call: CallbackQuery):
+    await call.message.edit_text("Выбери устройство:", reply_markup=download_menu())
+
+
+@dp.callback_query(F.data == "pc")
+async def pc(call: CallbackQuery):
+    await call.message.answer("Скачать VPN для ПК: (сюда вставишь ссылку)")
+
+
+@dp.callback_query(F.data == "android")
+async def android(call: CallbackQuery):
+    await call.message.answer("Скачать VPN для Android: (сюда вставишь ссылку)")
+
+
+# --- ПРОМОКОД ---
 
 @dp.callback_query(F.data == "enter_promo")
 async def promo(call: CallbackQuery):
@@ -104,7 +129,14 @@ async def promo(call: CallbackQuery):
     await call.message.answer("Введи промокод:")
 
 
-# --- АДМИН СОЗДАНИЕ ПРОМО ---
+# --- АДМИН ---
+
+@dp.callback_query(F.data == "admin")
+async def admin(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        return
+    await call.message.edit_text("Админ панель:", reply_markup=admin_menu())
+
 
 @dp.callback_query(F.data == "create_promo")
 async def create_promo(call: CallbackQuery):
@@ -119,18 +151,23 @@ async def create_promo(call: CallbackQuery):
 
 @dp.callback_query(F.data == "stats")
 async def stats(call: CallbackQuery):
-    if call.from_user.id not in ADMINS:
-        return
-
-    await call.message.edit_text("📊 Статистика:", reply_markup=stats_menu())
+    await call.message.edit_text("Статистика:", reply_markup=stats_menu())
 
 
 @dp.callback_query(F.data == "users")
 async def users(call: CallbackQuery):
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
 
-    await call.message.answer(f"👥 Пользователей: {count}")
+    if not users:
+        await call.message.answer("Нет пользователей")
+        return
+
+    text = "Список пользователей:\n\n"
+    for u in users:
+        text += f"{u[0]}\n"
+
+    await call.message.answer(text)
 
 
 @dp.callback_query(F.data == "promos")
@@ -139,33 +176,22 @@ async def promos(call: CallbackQuery):
     data = cursor.fetchall()
 
     if not data:
-        await call.message.answer("❌ Промокодов нет")
+        await call.message.answer("Нет промокодов")
         return
 
-    text = "🎁 Промокоды:\n\n"
+    text = "Промокоды:\n\n"
     for code, days in data:
-        text += f"{code} — {days} дней\n"
+        text += f"{code} - {days} дней\n"
 
     await call.message.answer(text)
 
 
-# --- АДМИН МЕНЮ ---
-
-@dp.callback_query(F.data == "admin")
-async def admin(call: CallbackQuery):
-    if call.from_user.id not in ADMINS:
-        return
-
-    await call.message.edit_text("⚙️ Админ панель:", reply_markup=admin_menu())
-
-
-# --- ОБРАБОТКА ТЕКСТА ---
+# --- ТЕКСТ ---
 
 @dp.message()
 async def handle_text(message: Message):
     state = user_state.get(message.from_user.id)
 
-    # ввод промокода
     if state == "enter_promo":
         code = message.text.strip()
 
@@ -173,18 +199,16 @@ async def handle_text(message: Message):
         res = cursor.fetchone()
 
         if res:
-            await message.answer(f"✅ Активировано: {res[0]} дней")
+            await message.answer(f"Активировано: {res[0]} дней")
         else:
-            await message.answer("❌ Неверный промокод")
+            await message.answer("Неверный промокод")
 
         user_state.pop(message.from_user.id, None)
 
-    # создание промокода
     elif state == "create_promo":
         try:
             days = int(message.text)
 
-            # уникальный код
             while True:
                 code = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
                 cursor.execute("SELECT * FROM promocodes WHERE code=?", (code,))
@@ -194,11 +218,11 @@ async def handle_text(message: Message):
             cursor.execute("INSERT INTO promocodes VALUES (?, ?)", (code, days))
             conn.commit()
 
-            await message.answer(f"✅ Промокод:\n{code}\nДней: {days}")
+            await message.answer(f"Промокод: {code}\nДней: {days}")
             user_state.pop(message.from_user.id, None)
 
         except:
-            await message.answer("❌ Введи число!")
+            await message.answer("Введи число!")
 
 
 # --- ЗАПУСК ---
